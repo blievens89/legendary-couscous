@@ -48,8 +48,6 @@ class GoogleTrendsAnalyzer:
     def get_interest_over_time(self, keywords, timeframe='today 5-y', geo='', cat=0, gprop=''):
         """Get interest over time data"""
         try:
-            # Debug info
-            st.info(f"Fetching data for keywords: {keywords}, timeframe: {timeframe}, geo: {geo}")
             self.pytrends.build_payload(keywords, cat=cat, timeframe=timeframe, geo=geo, gprop=gprop)
             return self.pytrends.interest_over_time()
         except Exception as e:
@@ -57,7 +55,6 @@ class GoogleTrendsAnalyzer:
                 self.handle_rate_limit_error(e)
             else:
                 st.error(f"Error fetching interest over time: {str(e)}")
-                st.error(f"Parameters used - Keywords: {keywords}, Timeframe: {timeframe}, Geo: {geo}")
             return None
     
     def get_interest_by_region(self, keywords, timeframe='today 5-y', geo='', cat=0, gprop='', resolution='COUNTRY'):
@@ -249,7 +246,6 @@ def main():
         # Analysis options
         st.subheader("Analysis Options")
         show_interest_over_time = st.checkbox("Interest Over Time", value=True)
-        show_interest_by_region = st.checkbox("Interest by Region", value=True)
         show_related_queries = st.checkbox("Related Queries", value=True)
         show_related_topics = st.checkbox("Related Topics", value=False)
         show_trending = st.checkbox("Trending Searches", value=False)
@@ -275,8 +271,6 @@ def main():
         tab_names = []
         if show_interest_over_time:
             tab_names.append("📈 Interest Over Time")
-        if show_interest_by_region:
-            tab_names.append("🗺️ Interest by Region")
         if show_related_queries:
             tab_names.append("🔍 Related Queries")
         if show_related_topics:
@@ -336,62 +330,6 @@ def main():
                             label="📥 Download CSV",
                             data=csv,
                             file_name=f"interest_over_time_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-                            mime="text/csv"
-                        )
-            tab_index += 1
-        
-        # Interest by Region
-        if show_interest_by_region:
-            with tabs[tab_index]:
-                st.subheader("🗺️ Interest by Region")
-                
-                resolution = st.radio("Resolution", ["COUNTRY", "REGION", "CITY", "DMA"], horizontal=True)
-                
-                with st.spinner("Fetching regional interest data..."):
-                    region_data = analyzer.get_interest_by_region(keywords, timeframe, geo, cat, gprop, resolution)
-                
-                if region_data is not None and not region_data.empty:
-                    # Create choropleth map for countries
-                    if resolution == "COUNTRY" and 'geoCode' in region_data.columns:
-                        # Prepare data for choropleth
-                        choropleth_data = region_data.reset_index()
-                        # Ensure geoCode column exists and has valid values
-                        if 'geoCode' in choropleth_data.columns and not choropleth_data['geoCode'].isna().all():
-                            fig = px.choropleth(
-                                choropleth_data,
-                                locations='geoCode',
-                                color=region_data.columns[0],
-                                hover_name='geoName' if 'geoName' in choropleth_data.columns else 'index',
-                                color_continuous_scale='Viridis',
-                                title=f"Interest by Country: {keywords[0]}"
-                            )
-                            fig.update_layout(height=600)
-                            st.plotly_chart(fig, use_container_width=True)
-                        else:
-                            st.info("Geographic data not available for choropleth map")
-                    
-                    # Bar chart for top regions
-                    top_regions = region_data.head(20)
-                    fig_bar = px.bar(
-                        top_regions.reset_index(),
-                        x=top_regions.columns[0],
-                        y='index',
-                        orientation='h',
-                        title=f"Top 20 {resolution.title()}s by Interest"
-                    )
-                    fig_bar.update_layout(height=600)
-                    st.plotly_chart(fig_bar, use_container_width=True)
-                    
-                    # Show data table
-                    with st.expander("📊 View Data Table"):
-                        st.dataframe(region_data, use_container_width=True)
-                        
-                        # Download button
-                        csv = region_data.to_csv()
-                        st.download_button(
-                            label="📥 Download CSV",
-                            data=csv,
-                            file_name=f"interest_by_region_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
                             mime="text/csv"
                         )
             tab_index += 1
