@@ -5,6 +5,7 @@
 # - Input mode: Keywords or Topic MIDs
 # - Interest over time, Related queries, Trending searches, Suggestions, Difficulty proxy
 # - Progress bars, caching, retry/backoff, per-keyword fetching, CSV export
+# - FIXED: Proper rate limiting and error handling for 429 errors
 
 import time
 import json
@@ -150,6 +151,31 @@ def parse_category_choice(choice_str: str) -> int:
         return 0
 
 # -------------------------
+# RATE LIMITING & TREND REQ
+# -------------------------
+@st.cache_resource
+def get_trends_client(hl):
+    """Create a persistent TrendReq client with proper rate limiting configuration."""
+    return TrendReq(
+        hl=hl,
+        tz=0,
+        timeout=(10, 25),
+        retries=3,
+        backoff_factor=0.1,
+        requests_args={'verify': True}
+    )
+
+def handle_rate_limit_error(e, attempt=1):
+    """Handle 429 rate limit errors with progressive delays."""
+    if "429" in str(e):
+        # Implement the documented 60-second delay for rate limits
+        delay = 60 * attempt  # Progressive delay: 60s, 120s, 180s
+        st.warning(f"Rate limited by Google. Waiting {delay} seconds before retry...")
+        time.sleep(delay)
+        return True
+    return False
+
+# -------------------------
 # SIDEBAR — GLOBAL CONTROLS
 # -------------------------
 with st.sidebar:
@@ -212,21 +238,21 @@ with st.sidebar:
 
     st.divider()
     st.caption("Fetch behaviour")
-    rpm = st.slider("Max requests per minute", 6, 60, 20,
-                    help="Adds a small delay between requests to be kind to rate limits.")
+    rpm = st.slider("Max requests per minute", 1, 12, 6,  # Reduced max from 60 to 12
+                    help="Conservative rate limiting to avoid 429 errors.")
     per_request_delay = 60.0 / float(rpm)
-    max_retries = st.slider("Max retries on error", 0, 5, 2)
-    backoff_base = st.slider("Backoff (seconds)", 1, 10, 3,
+    max_retries = st.slider("Max retries on error", 0, 5, 3)  # Increased default
+    backoff_base = st.slider("Backoff (seconds)", 5, 30, 10,  # Increased defaults
                              help="Wait time grows with each retry.")
     show_raw = st.toggle("Show raw results", value=False)
 
 # -------------------------
-# CACHED FETCHES WITH RETRY
+# CACHED FETCHES WITH IMPROVED RETRY
 # -------------------------
 @st.cache_data(show_spinner=False, ttl=3600)
 def cached_interest_for_term(term, timeframe, geo, hl, cat):
     """Fetch interest_over_time for a single term (keyword or MID) with category filter (cached)."""
-    py = TrendReq(hl=hl, tz=0)
+    py = get_trends_client(hl)
     py.build_payload(kw_list=[term], timeframe=timeframe, geo=geo, cat=cat)
     df = py.interest_over_time()
     if df.empty:
@@ -237,20 +263,28 @@ def cached_interest_for_term(term, timeframe, geo, hl, cat):
     return df
 
 def fetch_with_retry(term, timeframe, geo, hl, cat, max_retries, backoff_base):
-    tries = 0
-    while True:
+    """Enhanced retry logic with proper 429 handling."""
+    for attempt in range(max_retries + 1):
         try:
             return cached_interest_for_term(term, timeframe, geo, hl, cat)
         except Exception as e:
-            tries += 1
-            if tries > max_retries:
+            if attempt < max_retries:
+                if handle_rate_limit_error(e, attempt + 1):
+                    continue  # Rate limit handled, try again
+                else:
+                    # Other error, use exponential backoff
+                    delay = backoff_base * (2 ** attempt)
+                    st.warning(f"Error fetching {term}: {str(e)[:100]}... Retrying in {delay}s")
+                    time.sleep(delay)
+            else:
+                # Final attempt failed
+                st.error(f"Failed to fetch data for '{term}' after {max_retries + 1} attempts: {str(e)[:200]}")
                 raise
-            time.sleep(backoff_base * tries)
 
 @st.cache_data(show_spinner=False, ttl=3600)
 def cached_related_queries(keywords, timeframe, geo, hl, cat):
     """Fetch related queries dict for a list (cached as a whole)."""
-    py = TrendReq(hl=hl, tz=0)
+    py = get_trends_client(hl)
     py.build_payload(kw_list=list(keywords), timeframe=timeframe, geo=geo, cat=cat)
     return py.related_queries() or {}
 
@@ -339,16 +373,21 @@ def section_interest_over_time(terms, timeframe, geo, hl, cat_id, gran_rule):
         try:
             df = fetch_with_retry(term, timeframe, geo, hl, cat_id,
                                   max_retries=max_retries, backoff_base=backoff_base)
-            combined = df if combined is None else combined.join(df, how="outer")
+            if df is not None and not df.empty:
+                combined = df if combined is None else combined.join(df, how="outer")
         except Exception as e:
             errors[term] = str(e)
         progress.progress(int(i * 100 / total))
+        # Conservative delay between requests
         time.sleep(per_request_delay)
 
     progress.empty(); status.empty()
 
     if combined is None or combined.empty:
         st.warning("No data returned.")
+        if errors:
+            st.error("Errors encountered:")
+            st.json(errors)
         return None
 
     combined = combined.sort_index()
@@ -404,6 +443,9 @@ def section_related_queries(terms, timeframe, geo, hl, cat_id):
                 st.write("No Rising results.")
         return rq
     except Exception as e:
+        if handle_rate_limit_error(e):
+            st.info("Retrying related queries after rate limit...")
+            return section_related_queries(terms, timeframe, geo, hl, cat_id)
         st.error(f"Error: {e}")
         return {}
 
@@ -416,7 +458,7 @@ def section_trending_searches():
     pn_name = pn_col1.selectbox("Country", list(PN_OPTIONS.keys()), index=0, key="pn")
     if st.button("Fetch trending searches"):
         try:
-            py = TrendReq(hl=hl, tz=0)
+            py = get_trends_client(hl)
             ts = py.trending_searches(pn=PN_OPTIONS[pn_name])
             if ts.empty:
                 st.warning("No data returned.")
@@ -427,6 +469,9 @@ def section_trending_searches():
                     with st.expander("Raw", expanded=False):
                         st.write(ts)
         except Exception as e:
+            if handle_rate_limit_error(e):
+                st.info("Retrying trending searches after rate limit...")
+                return section_trending_searches()
             st.error(f"Error: {e}")
 
 # -------------------------
@@ -440,7 +485,7 @@ def section_suggestions(terms):
     rows = []
     for kw in terms:
         try:
-            py = TrendReq(hl=hl, tz=0)
+            py = get_trends_client(hl)
             sug = py.suggestions(keyword=kw)
             for s in sug:
                 rows.append({
@@ -450,7 +495,22 @@ def section_suggestions(terms):
                     "mid": s.get("mid")
                 })
         except Exception as e:
-            rows.append({"seed": kw, "title": None, "type": None, "mid": None, "error": str(e)})
+            if handle_rate_limit_error(e):
+                # Retry this keyword
+                try:
+                    py = get_trends_client(hl)
+                    sug = py.suggestions(keyword=kw)
+                    for s in sug:
+                        rows.append({
+                            "seed": kw,
+                            "title": s.get("title"),
+                            "type": s.get("type"),
+                            "mid": s.get("mid")
+                        })
+                except Exception as e2:
+                    rows.append({"seed": kw, "title": None, "type": None, "mid": None, "error": str(e2)})
+            else:
+                rows.append({"seed": kw, "title": None, "type": None, "mid": None, "error": str(e)})
         time.sleep(per_request_delay)
 
     df = pd.DataFrame(rows)
@@ -468,7 +528,7 @@ def section_suggestions(terms):
 # -------------------------
 def section_difficulty_proxy(terms, timeframe, geo, hl, cat_id, iot_df=None, rq_dict=None):
     st.markdown("### Difficulty proxy (0–100)")
-    st.caption("Higher = more competitive/‘hotter’. Combines base interest, trend slope, and Rising related queries intensity.")
+    st.caption("Higher = more competitive/'hotter'. Combines base interest, trend slope, and Rising related queries intensity.")
 
     # Use what we already have if provided (saves requests)
     iot_all = {}
@@ -484,7 +544,7 @@ def section_difficulty_proxy(terms, timeframe, geo, hl, cat_id, iot_df=None, rq_
             try:
                 df = fetch_with_retry(term, timeframe, geo, hl, cat_id,
                                       max_retries=max_retries, backoff_base=backoff_base)
-                if not df.empty:
+                if df is not None and not df.empty:
                     iot_all[term] = df[term]
             except Exception:
                 pass
