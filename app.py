@@ -444,7 +444,7 @@ def main():
                 
                 country_code = st.selectbox(
                     "Select Country",
-                    ["united_states", "united_kingdom", "canada", "australia", "india", 
+                    ["united_kingdom", "united_states", "canada", "australia", "india", 
                      "germany", "france", "japan", "brazil", "mexico"],
                     index=0
                 )
