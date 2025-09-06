@@ -1,6 +1,7 @@
 streamlit
-pytrends
+pytrends==4.9.2
 pandas
 plotly
 python-dateutil
-requests
+requests>=2.28.0
+urllib3<2.0
