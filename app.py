@@ -165,13 +165,11 @@ def get_trends_client(hl):
         requests_args={'verify': True}
     )
 
-def handle_rate_limit_error(e, attempt=1):
-    """Handle 429 rate limit errors with progressive delays."""
+def handle_rate_limit_error(e):
+    """Simple 429 error handler."""
     if "429" in str(e):
-        # Implement the documented 60-second delay for rate limits
-        delay = 60 * attempt  # Progressive delay: 60s, 120s, 180s
-        st.warning(f"Rate limited by Google. Waiting {delay} seconds before retry...")
-        time.sleep(delay)
+        st.warning("Rate limited by Google. Waiting 60 seconds...")
+        time.sleep(60)
         return True
     return False
 
