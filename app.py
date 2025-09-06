@@ -48,6 +48,8 @@ class GoogleTrendsAnalyzer:
     def get_interest_over_time(self, keywords, timeframe='today 5-y', geo='', cat=0, gprop=''):
         """Get interest over time data"""
         try:
+            # Debug info
+            st.info(f"Fetching data for keywords: {keywords}, timeframe: {timeframe}, geo: {geo}")
             self.pytrends.build_payload(keywords, cat=cat, timeframe=timeframe, geo=geo, gprop=gprop)
             return self.pytrends.interest_over_time()
         except Exception as e:
@@ -55,6 +57,7 @@ class GoogleTrendsAnalyzer:
                 self.handle_rate_limit_error(e)
             else:
                 st.error(f"Error fetching interest over time: {str(e)}")
+                st.error(f"Parameters used - Keywords: {keywords}, Timeframe: {timeframe}, Geo: {geo}")
             return None
     
     def get_interest_by_region(self, keywords, timeframe='today 5-y', geo='', cat=0, gprop='', resolution='COUNTRY'):
@@ -165,8 +168,8 @@ def main():
         
         # Connection settings
         st.subheader("Connection Settings")
-        hl = st.selectbox("Language", ["en-US", "en-GB", "es", "fr", "de", "it", "pt", "ru", "ja", "zh-CN"], index=0)
-        tz = st.number_input("Timezone Offset (minutes)", value=360, help="For US CST use 360")
+        hl = st.selectbox("Language", ["en-US", "en-GB", "es", "fr", "de", "it", "pt", "ru", "ja", "zh-CN"], index=1)
+        tz = st.number_input("Timezone Offset (minutes)", value=0, help="For UK GMT use 0, for US CST use 360")
         
         use_proxies = st.checkbox("Use Proxies (for rate limit issues)")
         proxies_list = None
@@ -198,8 +201,8 @@ def main():
             "Timeframe",
             ["Past hour", "Past 4 hours", "Past day", "Past 7 days", 
              "Past 30 days", "Past 90 days", "Past 12 months", 
-             "Past 5 years", "Past 12 years", "All time", "Custom range"],
-            index=8  # Set "Past 12 years" as default
+             "Past 5 years", "All time", "Custom range"],
+            index=6  # Set "Past 12 months" as default
         )
         
         timeframe_map = {
@@ -211,7 +214,6 @@ def main():
             "Past 90 days": "today 3-m",
             "Past 12 months": "today 12-m",
             "Past 5 years": "today 5-y",
-            "Past 12 years": "today 12-y",
             "All time": "all"
         }
         
