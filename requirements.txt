@@ -1,5 +1,7 @@
 streamlit
-requests
+pytrends==4.9.2
 pandas
-numpy
-altair
+plotly
+python-dateutil
+requests>=2.28.0
+urllib3<2.0
