@@ -96,12 +96,19 @@ class GoogleTrendsAnalyzer:
     def get_trending_searches(self, pn='united_states'):
         """Get trending searches"""
         try:
-            return self.pytrends.trending_searches(pn=pn)
+            # Try different country code formats if the first one fails
+            try:
+                return self.pytrends.trending_searches(pn=pn)
+            except:
+                # Try with just the country name
+                country_name = pn.replace('_', ' ').title()
+                return self.pytrends.trending_searches(pn=country_name)
         except Exception as e:
             if '429' in str(e):
                 self.handle_rate_limit_error(e)
             else:
                 st.error(f"Error fetching trending searches: {str(e)}")
+                st.info("Note: Trending searches may not be available for all countries or time periods")
             return None
     
     def get_suggestions(self, keyword):
@@ -380,7 +387,7 @@ def main():
                 
                 if topics_data:
                     for keyword in keywords:
-                        if keyword in topics_data:
+                        if keyword in topics_data and topics_data[keyword]:
                             st.write(f"**{keyword}**")
                             
                             col1, col2 = st.columns(2)
@@ -388,22 +395,30 @@ def main():
                             # Top topics
                             with col1:
                                 st.write("📊 Top Related Topics")
-                                top_df = topics_data[keyword]['top']
-                                if top_df is not None and not top_df.empty:
-                                    st.dataframe(top_df, use_container_width=True)
-                                else:
+                                try:
+                                    top_df = topics_data[keyword]['top']
+                                    if top_df is not None and not top_df.empty:
+                                        st.dataframe(top_df, use_container_width=True)
+                                    else:
+                                        st.info("No top topics found")
+                                except (KeyError, IndexError, TypeError):
                                     st.info("No top topics found")
                             
                             # Rising topics
                             with col2:
                                 st.write("📈 Rising Topics")
-                                rising_df = topics_data[keyword]['rising']
-                                if rising_df is not None and not rising_df.empty:
-                                    st.dataframe(rising_df, use_container_width=True)
-                                else:
+                                try:
+                                    rising_df = topics_data[keyword]['rising']
+                                    if rising_df is not None and not rising_df.empty:
+                                        st.dataframe(rising_df, use_container_width=True)
+                                    else:
+                                        st.info("No rising topics found")
+                                except (KeyError, IndexError, TypeError):
                                     st.info("No rising topics found")
                             
                             st.divider()
+                        else:
+                            st.info(f"No topics data found for {keyword}")
             tab_index += 1
         
         # Trending Searches
@@ -418,8 +433,23 @@ def main():
                     index=0
                 )
                 
+                # Convert to proper country code for PyTrends
+                country_map = {
+                    "united_kingdom": "united_kingdom",
+                    "united_states": "united_states", 
+                    "canada": "canada",
+                    "australia": "australia",
+                    "india": "india",
+                    "germany": "germany",
+                    "france": "france",
+                    "japan": "japan",
+                    "brazil": "brazil",
+                    "mexico": "mexico"
+                }
+                pn_code = country_map.get(country_code, "united_kingdom")
+                
                 with st.spinner("Fetching trending searches..."):
-                    trending_data = analyzer.get_trending_searches(country_code)
+                    trending_data = analyzer.get_trending_searches(pn_code)
                 
                 if trending_data is not None and not trending_data.empty:
                     st.dataframe(trending_data, use_container_width=True)
