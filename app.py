@@ -188,7 +188,7 @@ def main():
         # Keywords input
         keywords_input = st.text_area(
             "Keywords (one per line, max 5)",
-            value="Python\nJavaScript",
+            value="Brexit\nCOVID-19",
             help="Enter up to 5 keywords to compare"
         )
         keywords = [k.strip() for k in keywords_input.split('\n') if k.strip()][:5]
@@ -198,7 +198,8 @@ def main():
             "Timeframe",
             ["Past hour", "Past 4 hours", "Past day", "Past 7 days", 
              "Past 30 days", "Past 90 days", "Past 12 months", 
-             "Past 5 years", "All time", "Custom range"]
+             "Past 5 years", "Past 12 years", "All time", "Custom range"],
+            index=8  # Set "Past 12 years" as default
         )
         
         timeframe_map = {
@@ -210,6 +211,7 @@ def main():
             "Past 90 days": "today 3-m",
             "Past 12 months": "today 12-m",
             "Past 5 years": "today 5-y",
+            "Past 12 years": "today 12-y",
             "All time": "all"
         }
         
@@ -224,7 +226,7 @@ def main():
             timeframe = timeframe_map[timeframe_option]
         
         # Geographic location
-        geo = st.text_input("Geographic Location", value="", 
+        geo = st.text_input("Geographic Location", value="GB", 
                           placeholder="e.g., US, GB, US-CA",
                           help="Leave empty for worldwide")
         
@@ -349,16 +351,22 @@ def main():
                 if region_data is not None and not region_data.empty:
                     # Create choropleth map for countries
                     if resolution == "COUNTRY" and 'geoCode' in region_data.columns:
-                        fig = px.choropleth(
-                            region_data.reset_index(),
-                            locations='geoCode',
-                            color=region_data.columns[0],
-                            hover_name='geoName' if 'geoName' in region_data.columns else 'index',
-                            color_continuous_scale='Viridis',
-                            title=f"Interest by Country: {keywords[0]}"
-                        )
-                        fig.update_layout(height=600)
-                        st.plotly_chart(fig, use_container_width=True)
+                        # Prepare data for choropleth
+                        choropleth_data = region_data.reset_index()
+                        # Ensure geoCode column exists and has valid values
+                        if 'geoCode' in choropleth_data.columns and not choropleth_data['geoCode'].isna().all():
+                            fig = px.choropleth(
+                                choropleth_data,
+                                locations='geoCode',
+                                color=region_data.columns[0],
+                                hover_name='geoName' if 'geoName' in choropleth_data.columns else 'index',
+                                color_continuous_scale='Viridis',
+                                title=f"Interest by Country: {keywords[0]}"
+                            )
+                            fig.update_layout(height=600)
+                            st.plotly_chart(fig, use_container_width=True)
+                        else:
+                            st.info("Geographic data not available for choropleth map")
                     
                     # Bar chart for top regions
                     top_regions = region_data.head(20)
