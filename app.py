@@ -1,471 +1,556 @@
-import streamlit as st
-import pandas as pd
-import plotly.graph_objects as go
-import plotly.express as px
-from pytrends.request import TrendReq
+# app.py — Single-page Trends dashboard with Category selector + Difficulty proxy
+# Features:
+# - Single scrolling page (no tabs)
+# - Category selector (built-in list OR load full list via JSON URL) + manual ID override
+# - Input mode: Keywords or Topic MIDs
+# - Interest over time, Related queries, Trending searches, Suggestions, Difficulty proxy
+# - Progress bars, caching, retry/backoff, per-keyword fetching, CSV export
+
 import time
-from datetime import datetime, timedelta
 import json
+import datetime as dt
+from dateutil.relativedelta import relativedelta
+import numpy as np
+import pandas as pd
+import requests
+import streamlit as st
+from pytrends.request import TrendReq
 
-class GoogleTrendsAnalyzer:
-    def __init__(self):
-        """Initialize the Google Trends Analyzer"""
-        self.initialize_session_state()
-        
-    def initialize_session_state(self):
-        """Initialize session state variables"""
-        if 'results_cache' not in st.session_state:
-            st.session_state.results_cache = {}
-        if 'last_search' not in st.session_state:
-            st.session_state.last_search = None
-        if 'pytrends_instance' not in st.session_state:
-            st.session_state.pytrends_instance = None
-        if 'connection_settings' not in st.session_state:
-            st.session_state.connection_settings = None
-    
-    @property
-    def pytrends(self):
-        """Property to access the pytrends instance from session state"""
-        return st.session_state.pytrends_instance
-            
-    def create_connection(self, hl='en-US', tz=360, use_proxies=False, proxies_list=None):
-        """Create a connection to Google Trends API - creates new instance if settings change"""
-        try:
-            # Store connection settings to detect changes
-            current_settings = {
-                'hl': hl,
-                'tz': tz,
-                'use_proxies': use_proxies,
-                'proxies': tuple(proxies_list) if proxies_list else None
-            }
-            
-            # Check if settings changed
-            if st.session_state.connection_settings == current_settings and st.session_state.pytrends_instance is not None:
-                return True
-            
-            # Settings changed or no instance - create new connection
-            if use_proxies and proxies_list:
-                st.session_state.pytrends_instance = TrendReq(
-                    hl=hl, 
-                    tz=tz,
-                    timeout=(10, 25),
-                    proxies=proxies_list,
-                    retries=2,
-                    backoff_factor=0.1,
-                    requests_args={'verify': False}
-                )
-            else:
-                st.session_state.pytrends_instance = TrendReq(
-                    hl=hl, 
-                    tz=tz,
-                    timeout=(10, 25),
-                    retries=2,
-                    backoff_factor=0.1
-                )
-            
-            # Store the settings
-            st.session_state.connection_settings = current_settings
-            return True
-            
-        except Exception as e:
-            st.error(f"Failed to create connection: {str(e)}")
-            return False
-    
-    def get_historical_interest_data(self, keywords, year_start, month_start, day_start, 
-                                     year_end, month_end, day_end, geo='', cat=0, gprop=''):
-        """Get historical hourly interest data with built-in rate limiting"""
-        try:
-            return self.pytrends.get_historical_interest(
-                keywords,
-                year_start=year_start,
-                month_start=month_start,
-                day_start=day_start,
-                hour_start=0,
-                year_end=year_end,
-                month_end=month_end,
-                day_end=day_end,
-                hour_end=0,
-                cat=cat,
-                geo=geo,
-                gprop=gprop,
-                sleep=60  # This is the built-in rate limiting
-            )
-        except Exception as e:
-            st.error(f"Error fetching historical interest: {str(e)}")
-            return None
-    
-    def get_related_queries(self, keywords, timeframe='today 5-y', geo='', cat=0, gprop=''):
-        """Get related queries"""
-        try:
-            time.sleep(60)  # Manual rate limiting
-            self.pytrends.build_payload(keywords, cat=cat, timeframe=timeframe, geo=geo, gprop=gprop)
-            return self.pytrends.related_queries()
-        except Exception as e:
-            st.error(f"Error fetching related queries: {str(e)}")
-            return None
-    
-    def get_related_topics(self, keywords, timeframe='today 5-y', geo='', cat=0, gprop=''):
-        """Get related topics"""
-        try:
-            time.sleep(60)  # Manual rate limiting
-            self.pytrends.build_payload(keywords, cat=cat, timeframe=timeframe, geo=geo, gprop=gprop)
-            return self.pytrends.related_topics()
-        except Exception as e:
-            st.error(f"Error fetching related topics: {str(e)}")
-            return None
-    
-    def get_trending_searches(self, pn='united_states'):
-        """Get trending searches"""
-        try:
-            time.sleep(60)  # Manual rate limiting
-            try:
-                return self.pytrends.trending_searches(pn=pn)
-            except:
-                country_name = pn.replace('_', ' ').title()
-                return self.pytrends.trending_searches(pn=country_name)
-        except Exception as e:
-            st.error(f"Error fetching trending searches: {str(e)}")
-            st.info("Note: Trending searches may not be available for all countries or time periods")
-            return None
-    
-    def get_suggestions(self, keyword):
-        """Get keyword suggestions"""
-        try:
-            time.sleep(60)  # Manual rate limiting
-            return self.pytrends.suggestions(keyword)
-        except Exception as e:
-            st.error(f"Error fetching suggestions: {str(e)}")
-            return None
+# -------------------------
+# PAGE / THEME
+# -------------------------
+st.set_page_config(page_title="Google Trends Control Panel", layout="wide")
+st.title("Google Trends Control Panel")
 
-def main():
-    st.set_page_config(
-        page_title="Google Trends Analyzer",
-        page_icon="📊",
-        layout="wide"
+# -------------------------
+# HELPERS / CONSTANTS
+# -------------------------
+COUNTRIES = {
+    "Worldwide": "",
+    "United Kingdom (GB)": "GB",
+    "United States (US)": "US",
+    "Ireland (IE)": "IE",
+    "Netherlands (NL)": "NL",
+    "Germany (DE)": "DE",
+    "France (FR)": "FR",
+    "Spain (ES)": "ES",
+    "Italy (IT)": "IT",
+    "Australia (AU)": "AU",
+    "Canada (CA)": "CA",
+}
+
+PN_OPTIONS = {
+    "United Kingdom": "united_kingdom",
+    "United States": "united_states",
+    "Ireland": "ireland",
+    "Netherlands": "netherlands",
+    "Germany": "germany",
+    "France": "france",
+    "Spain": "spain",
+    "Italy": "italy",
+    "Australia": "australia",
+    "Canada": "canada",
+    "India": "india",
+    "Japan": "japan",
+}
+
+LANGS = {
+    "English (UK)": "en-GB",
+    "English (US)": "en-US",
+    "Dutch": "nl-NL",
+    "German": "de-DE",
+    "French": "fr-FR",
+    "Spanish": "es-ES",
+    "Italian": "it-IT",
+}
+
+# A compact built-in starter set of categories (ID: Name).
+# You can load the full list via URL (see sidebar).
+BUILTIN_CATEGORIES = {
+    0: "All categories",
+    3: "Arts & Entertainment",
+    5: "Autos & Vehicles",
+    7: "Beauty & Fitness",
+    12: "Business & Industrial",
+    13: "Computers & Electronics (Internet & Telecom in some docs)",
+    19: "Finance",
+    184: "Food & Drink",
+    20: "Games",
+    533: "Health",
+    44: "Hobbies & Leisure",
+    1227: "Home & Garden",
+    65: "Jobs & Education",
+    958: "Law & Government",
+    70: "News",
+    299: "Online Communities",
+    974: "People & Society",
+    968: "Pets & Animals",
+    882: "Real Estate",
+    66: "Reference",
+    452: "Science",
+    174: "Shopping",
+    673: "Sports",
+    258: "Travel",
+}
+
+TIMEFRAME_PRESETS = ["today 3-m", "today 12-m", "today 5-y", "all", "Custom…"]
+
+RESAMPLE = {
+    "No resample (native)": None,
+    "Weekly average": "W",
+    "Monthly average": "MS",  # month start
+}
+
+def make_timeframe(preset, start=None, end=None):
+    if preset != "Custom…":
+        return preset
+    return f"{start:%Y-%m-%d} {end:%Y-%m-%d}"
+
+def resample_df(df, rule):
+    if not rule or df.empty:
+        return df
+    return df.resample(rule).mean().round(2)
+
+def download_csv(df, label, filename):
+    if df.empty:
+        return
+    st.download_button(
+        label=label,
+        data=df.to_csv(index=True).encode("utf-8"),
+        file_name=filename,
+        mime="text/csv",
     )
-    
-    st.title("📊 Google Trends Analyzer")
-    st.markdown("Analyze search trends with built-in rate limiting")
-    
-    # Initialize analyzer
-    analyzer = GoogleTrendsAnalyzer()
-    
-    # Sidebar configuration
-    with st.sidebar:
-        st.header("⚙️ Configuration")
-        
-        # Connection settings
-        st.subheader("Connection Settings")
-        hl = st.selectbox("Language", ["en-US", "en-GB", "es", "fr", "de", "it", "pt", "ru", "ja", "zh-CN"], index=1)
-        tz = st.number_input("Timezone Offset (minutes)", value=0, help="For UK GMT use 0, for US CST use 360")
-        
-        use_proxies = st.checkbox("Use Proxies (for rate limit issues)")
-        proxies_list = None
-        if use_proxies:
-            proxy_input = st.text_area("Enter proxies (one per line)", 
-                                      placeholder="https://34.203.233.13:80\nhttps://35.201.123.31:880")
-            if proxy_input:
-                proxies_list = [p.strip() for p in proxy_input.strip().split('\n') if p.strip()]
-        
-        # Create connection
-        if analyzer.create_connection(hl, tz, use_proxies, proxies_list):
-            st.success("✅ Connected to Google Trends")
-        
-        st.divider()
-        
-        # Search parameters
-        st.subheader("Search Parameters")
-        
-        # Keywords input
-        keywords_input = st.text_area(
-            "Keywords (one per line, max 5)",
-            value="Mortgage",
-            help="Enter up to 5 keywords to compare"
-        )
-        keywords = [k.strip() for k in keywords_input.split('\n') if k.strip()][:5]
-        
-        # Date range
-        st.subheader("Date Range")
-        col1, col2 = st.columns(2)
-        with col1:
-            start_date = st.date_input("Start date", datetime.now() - timedelta(days=90))
-        with col2:
-            end_date = st.date_input("End date", datetime.now())
-        
-        # Geographic location
-        geo = st.text_input("Geographic Location", value="GB", 
-                          placeholder="e.g., US, GB, US-CA",
-                          help="Leave empty for worldwide")
-        
-        # Category
-        cat = st.number_input("Category", value=0, min_value=0,
-                            help="0 for all categories. See Google Trends for category codes")
-        
-        # Google property
-        gprop = st.selectbox("Google Property", 
-                           ["web", "images", "news", "youtube", "froogle"],
-                           index=0,
-                           help="Filter by Google property")
-        if gprop == "web":
-            gprop = ""
-        
-        st.divider()
-        
-        # Analysis options
-        st.subheader("Analysis Options")
-        show_interest_over_time = st.checkbox("Historical Interest", value=True)
-        show_related_queries = st.checkbox("Related Queries", value=False)
-        show_related_topics = st.checkbox("Related Topics", value=False)
-        show_trending = st.checkbox("Trending Searches", value=False)
-        show_suggestions = st.checkbox("Keyword Suggestions", value=False)
-        
-        st.warning("⏱️ Each analysis waits 60 seconds between API calls to avoid rate limits")
-    
-    # Main content area
-    if st.button("🔍 Analyze Trends", type="primary"):
-        if not keywords:
-            st.error("Please enter at least one keyword")
-            return
-        
-        # Check if connection exists
-        if analyzer.pytrends is None:
-            st.error("Connection not established. Please check configuration.")
-            return
-        
-        # Store search parameters
-        search_params = {
-            'keywords': keywords,
-            'start_date': start_date,
-            'end_date': end_date,
-            'geo': geo,
-            'cat': cat,
-            'gprop': gprop
-        }
-        st.session_state.last_search = search_params
-        
-        # Create tabs for different analyses
-        tab_names = []
-        if show_interest_over_time:
-            tab_names.append("📈 Historical Interest")
-        if show_related_queries:
-            tab_names.append("🔍 Related Queries")
-        if show_related_topics:
-            tab_names.append("📚 Related Topics")
-        if show_trending:
-            tab_names.append("🔥 Trending Searches")
-        if show_suggestions:
-            tab_names.append("💡 Suggestions")
-        
-        if tab_names:
-            tabs = st.tabs(tab_names)
-            tab_index = 0
-        else:
-            st.warning("Please select at least one analysis option in the sidebar.")
-            return
-        
-        # Historical Interest
-        if show_interest_over_time:
-            with tabs[tab_index]:
-                st.subheader("📈 Historical Interest Over Time")
-                st.info("Using get_historical_interest() with built-in 60-second rate limiting between requests")
-                
-                with st.spinner("Fetching historical interest data (this will take time due to rate limiting)..."):
-                    historical_data = analyzer.get_historical_interest_data(
-                        keywords,
-                        year_start=start_date.year,
-                        month_start=start_date.month,
-                        day_start=start_date.day,
-                        year_end=end_date.year,
-                        month_end=end_date.month,
-                        day_end=end_date.day,
-                        geo=geo,
-                        cat=cat,
-                        gprop=gprop
-                    )
-                    
-                if historical_data is not None and not historical_data.empty:
-                    # Remove 'isPartial' column if it exists
-                    if 'isPartial' in historical_data.columns:
-                        historical_data = historical_data.drop('isPartial', axis=1)
-                    
-                    # Create line chart
-                    fig = go.Figure()
-                    for col in historical_data.columns:
-                        fig.add_trace(go.Scatter(
-                            x=historical_data.index,
-                            y=historical_data[col],
-                            mode='lines',
-                            name=col,
-                            line=dict(width=2)
-                        ))
-                    
-                    fig.update_layout(
-                        title="Search Interest Over Time",
-                        xaxis_title="Date",
-                        yaxis_title="Interest (0-100)",
-                        hovermode='x unified',
-                        height=500
-                    )
-                    
-                    st.plotly_chart(fig, use_container_width=True)
-                    
-                    # Show data table
-                    with st.expander("📊 View Data Table"):
-                        st.dataframe(historical_data, use_container_width=True)
-                        
-                        # Download button
-                        csv = historical_data.to_csv()
-                        st.download_button(
-                            label="📥 Download CSV",
-                            data=csv,
-                            file_name=f"historical_interest_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-                            mime="text/csv"
-                        )
-                else:
-                    st.error("No data returned. You may still be rate-limited.")
-            tab_index += 1
-        
-        # Related Queries
-        if show_related_queries:
-            with tabs[tab_index]:
-                st.subheader("🔍 Related Queries")
-                st.info("Waiting 60 seconds before fetching...")
-                
-                with st.spinner("Fetching related queries..."):
-                    queries_data = analyzer.get_related_queries(keywords, f"{start_date} {end_date}", geo, cat, gprop)
-                
-                if queries_data:
-                    for keyword in keywords:
-                        if keyword in queries_data:
-                            st.write(f"**{keyword}**")
-                            
-                            col1, col2 = st.columns(2)
-                            
-                            # Top queries
-                            with col1:
-                                st.write("📊 Top Related Queries")
-                                top_df = queries_data[keyword]['top']
-                                if top_df is not None and not top_df.empty:
-                                    st.dataframe(top_df, use_container_width=True)
-                                else:
-                                    st.info("No top queries found")
-                            
-                            # Rising queries
-                            with col2:
-                                st.write("📈 Rising Queries")
-                                rising_df = queries_data[keyword]['rising']
-                                if rising_df is not None and not rising_df.empty:
-                                    st.dataframe(rising_df, use_container_width=True)
-                                else:
-                                    st.info("No rising queries found")
-                            
-                            st.divider()
-            tab_index += 1
-        
-        # Related Topics
-        if show_related_topics:
-            with tabs[tab_index]:
-                st.subheader("📚 Related Topics")
-                st.info("Waiting 60 seconds before fetching...")
-                
-                with st.spinner("Fetching related topics..."):
-                    topics_data = analyzer.get_related_topics(keywords, f"{start_date} {end_date}", geo, cat, gprop)
-                
-                if topics_data:
-                    for keyword in keywords:
-                        if keyword in topics_data and topics_data[keyword]:
-                            st.write(f"**{keyword}**")
-                            
-                            col1, col2 = st.columns(2)
-                            
-                            # Top topics
-                            with col1:
-                                st.write("📊 Top Related Topics")
-                                try:
-                                    top_df = topics_data[keyword]['top']
-                                    if top_df is not None and not top_df.empty:
-                                        st.dataframe(top_df, use_container_width=True)
-                                    else:
-                                        st.info("No top topics found")
-                                except (KeyError, IndexError, TypeError):
-                                    st.info("No top topics found")
-                            
-                            # Rising topics
-                            with col2:
-                                st.write("📈 Rising Topics")
-                                try:
-                                    rising_df = topics_data[keyword]['rising']
-                                    if rising_df is not None and not rising_df.empty:
-                                        st.dataframe(rising_df, use_container_width=True)
-                                    else:
-                                        st.info("No rising topics found")
-                                except (KeyError, IndexError, TypeError):
-                                    st.info("No rising topics found")
-                            
-                            st.divider()
-                        else:
-                            st.info(f"No topics data found for {keyword}")
-            tab_index += 1
-        
-        # Trending Searches
-        if show_trending:
-            with tabs[tab_index]:
-                st.subheader("🔥 Trending Searches")
-                
-                country_code = st.selectbox(
-                    "Select Country",
-                    ["united_kingdom", "united_states", "canada", "australia", "india", 
-                     "germany", "france", "japan", "brazil", "mexico"],
-                    index=0
-                )
-                
-                pn_code = country_code
-                
-                st.info("Waiting 60 seconds before fetching...")
-                with st.spinner("Fetching trending searches..."):
-                    trending_data = analyzer.get_trending_searches(pn_code)
-                
-                if trending_data is not None and not trending_data.empty:
-                    st.dataframe(trending_data, use_container_width=True)
-                    
-                    # Download button
-                    csv = trending_data.to_csv()
-                    st.download_button(
-                        label="📥 Download CSV",
-                        data=csv,
-                        file_name=f"trending_searches_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-                        mime="text/csv"
-                    )
-            tab_index += 1
-        
-        # Keyword Suggestions
-        if show_suggestions:
-            with tabs[tab_index]:
-                st.subheader("💡 Keyword Suggestions")
-                
-                for keyword in keywords:
-                    st.write(f"**Suggestions for: {keyword}**")
-                    
-                    st.info("Waiting 60 seconds before fetching...")
-                    with st.spinner(f"Fetching suggestions for {keyword}..."):
-                        suggestions = analyzer.get_suggestions(keyword)
-                    
-                    if suggestions:
-                        suggestions_df = pd.DataFrame(suggestions)
-                        st.dataframe(suggestions_df, use_container_width=True)
-                    else:
-                        st.info(f"No suggestions found for {keyword}")
-                    
-                    st.divider()
-    
-    # Footer
-    st.divider()
-    st.markdown("""
-    <div style='text-align: center; color: gray;'>
-        <p>📊 Google Trends Analyzer | Built with Streamlit and PyTrends</p>
-        <p>⚠️ Rate limiting: 60 seconds between each API call</p>
-    </div>
-    """, unsafe_allow_html=True)
 
-if __name__ == "__main__":
-    main()
+def band_from_score(score):
+    if score is None:
+        return "N/A"
+    if score < 30:
+        return "Easy"
+    if score < 60:
+        return "Medium"
+    return "Hard"
+
+def build_category_options(cat_map: dict):
+    # Return list of "Name (ID)" strings, sorted by name, with ID 0 on top.
+    items = [(cid, name) for cid, name in cat_map.items()]
+    items_sorted = sorted(items, key=lambda t: (t[0] != 0, t[1].lower()))
+    return [f"{name} ({cid})" for cid, name in items_sorted]
+
+def parse_category_choice(choice_str: str) -> int:
+    if not choice_str:
+        return 0
+    if "(" in choice_str and choice_str.endswith(")"):
+        try:
+            return int(choice_str.rsplit("(", 1)[1].rstrip(")"))
+        except:
+            return 0
+    try:
+        return int(choice_str)
+    except:
+        return 0
+
+# -------------------------
+# SIDEBAR — GLOBAL CONTROLS
+# -------------------------
+with st.sidebar:
+    st.header("Settings")
+
+    # Input mode: plain keywords or topic MIDs
+    input_mode = st.radio("Input type", ["Keywords", "Topic MIDs"], horizontal=True)
+
+    lang = st.selectbox("Language (UI only)", list(LANGS.keys()), index=0)
+    hl = LANGS[lang]
+
+    geo_name = st.selectbox("Region (geo)", list(COUNTRIES.keys()), index=1)
+    geo = COUNTRIES[geo_name]
+    geo_override = st.text_input("Override geo (optional, e.g. GB, US)")
+    if geo_override.strip():
+        geo = geo_override.strip()
+
+    tf_preset = st.selectbox("Timeframe", TIMEFRAME_PRESETS, index=1)
+    if tf_preset == "Custom…":
+        default_end = dt.date.today()
+        default_start = default_end - relativedelta(years=1)
+        start_date = st.date_input("Start date", value=default_start)
+        end_date = st.date_input("End date", value=default_end)
+        timeframe = make_timeframe(tf_preset, start_date, end_date)
+    else:
+        timeframe = tf_preset
+
+    gran = st.selectbox("Granularity", list(RESAMPLE.keys()), index=0)
+    gran_rule = RESAMPLE[gran]
+
+    st.divider()
+    st.caption("Category")
+    cat_source = st.radio("Source", ["Built-in", "Load from URL"], horizontal=True)
+    if cat_source == "Load from URL":
+        url = st.text_input("Full categories JSON URL",
+                            help="Must return a JSON array of {id: number, name: string}.")
+        loaded = {}
+        if url:
+            try:
+                r = requests.get(url, timeout=15)
+                r.raise_for_status()
+                data = r.json()
+                for row in data:
+                    if isinstance(row, dict) and "id" in row and "name" in row:
+                        loaded[int(row["id"])] = str(row["name"])
+                if loaded:
+                    st.success(f"Loaded {len(loaded)} categories.")
+                else:
+                    st.warning("No valid categories found in JSON.")
+            except Exception as e:
+                st.error(f"Failed to load categories: {e}")
+                loaded = {}
+        category_map = loaded if loaded else BUILTIN_CATEGORIES
+    else:
+        category_map = BUILTIN_CATEGORIES
+
+    cat_choice = st.selectbox("Category (type to search)", build_category_options(category_map), index=0)
+    cat_id_manual = st.text_input("Or enter Category ID (overrides selection)", value="")
+    cat_id = parse_category_choice(cat_id_manual) if cat_id_manual.strip() else parse_category_choice(cat_choice)
+
+    st.divider()
+    st.caption("Fetch behaviour")
+    rpm = st.slider("Max requests per minute", 6, 60, 20,
+                    help="Adds a small delay between requests to be kind to rate limits.")
+    per_request_delay = 60.0 / float(rpm)
+    max_retries = st.slider("Max retries on error", 0, 5, 2)
+    backoff_base = st.slider("Backoff (seconds)", 1, 10, 3,
+                             help="Wait time grows with each retry.")
+    show_raw = st.toggle("Show raw results", value=False)
+
+# -------------------------
+# CACHED FETCHES WITH RETRY
+# -------------------------
+@st.cache_data(show_spinner=False, ttl=3600)
+def cached_interest_for_term(term, timeframe, geo, hl, cat):
+    """Fetch interest_over_time for a single term (keyword or MID) with category filter (cached)."""
+    py = TrendReq(hl=hl, tz=0)
+    py.build_payload(kw_list=[term], timeframe=timeframe, geo=geo, cat=cat)
+    df = py.interest_over_time()
+    if df.empty:
+        return pd.DataFrame()
+    if "isPartial" in df.columns:
+        df = df.drop(columns=["isPartial"])
+    df.columns = [term]  # rename single column for join
+    return df
+
+def fetch_with_retry(term, timeframe, geo, hl, cat, max_retries, backoff_base):
+    tries = 0
+    while True:
+        try:
+            return cached_interest_for_term(term, timeframe, geo, hl, cat)
+        except Exception as e:
+            tries += 1
+            if tries > max_retries:
+                raise
+            time.sleep(backoff_base * tries)
+
+@st.cache_data(show_spinner=False, ttl=3600)
+def cached_related_queries(keywords, timeframe, geo, hl, cat):
+    """Fetch related queries dict for a list (cached as a whole)."""
+    py = TrendReq(hl=hl, tz=0)
+    py.build_payload(kw_list=list(keywords), timeframe=timeframe, geo=geo, cat=cat)
+    return py.related_queries() or {}
+
+# -------------------------
+# DIFFICULTY PROXY
+# -------------------------
+def slope_score_from_series(s: pd.Series) -> float:
+    """
+    Fit a simple linear regression to the interest series (index must be DatetimeIndex).
+    Returns a 0–100 score scaled from the slope.
+    """
+    if s is None or s.empty:
+        return 0.0
+    y = s.values.astype(float)
+    x = np.arange(len(y), dtype=float)
+    if len(x) < 3 or np.all(y == y[0]):
+        return 0.0
+    x_mean, y_mean = x.mean(), y.mean()
+    denom = np.sum((x - x_mean) ** 2)
+    if denom == 0:
+        return 0.0
+    slope = np.sum((x - x_mean) * (y - y_mean)) / denom
+    scale = 15.0  # adjust sensitivity; higher = less sensitive
+    score = 50.0 + 50.0 * np.tanh(slope * scale)
+    return float(np.clip(score, 0, 100))
+
+def rising_intensity_from_rq(rq_entry) -> float:
+    """
+    Given related_queries()[kw] entry, compute mean 'value' of Rising queries.
+    Returns 0–100 (already relative scale).
+    """
+    if not rq_entry:
+        return 0.0
+    rising_df = rq_entry.get("rising")
+    if rising_df is None or rising_df.empty or "value" not in rising_df.columns:
+        return 0.0
+    vals = rising_df["value"].astype(float).values[:10]
+    return float(np.clip(np.mean(vals), 0, 100))
+
+def difficulty_proxy(base_interest: float, slope_score: float, rising_intensity: float) -> float:
+    w_interest = 0.40
+    w_rising   = 0.40
+    w_slope    = 0.20
+    score = w_interest * base_interest + w_rising * rising_intensity + w_slope * slope_score
+    return float(np.clip(score, 0, 100))
+
+# -------------------------
+# INPUTS + SECTION SELECT
+# -------------------------
+st.markdown("**Enter terms** (comma‑separated).")
+placeholder = "/m/02k1b, /m/0k8z (for Topics)" if (st.session_state.get("input_mode") == "Topic MIDs" or input_mode == "Topic MIDs") \
+              else "web design, website builder"
+terms_raw = st.text_input("Search terms", value=placeholder if input_mode=="Topic MIDs" else "web design, website builder")
+terms = [t.strip() for t in terms_raw.split(",") if t.strip()]
+terms = list(dict.fromkeys(terms))  # de‑dupe, keep order
+
+st.divider()
+st.subheader("What to run")
+c1, c2, c3, c4, c5 = st.columns(5)
+do_iot = c1.checkbox("Interest over time", value=True)
+do_rq  = c2.checkbox("Related queries", value=True)
+do_ts  = c3.checkbox("Trending searches", value=False)
+do_sug = c4.checkbox("Suggestions", value=False)
+do_diff= c5.checkbox("Difficulty proxy", value=True)
+
+run_all = st.button("Run selected sections")
+
+# -------------------------
+# SECTION: INTEREST OVER TIME
+# -------------------------
+def section_interest_over_time(terms, timeframe, geo, hl, cat_id, gran_rule):
+    st.markdown("### Interest over time")
+    if not terms:
+        st.info("Add at least one term.")
+        return None
+
+    progress = st.progress(0)
+    status = st.empty()
+
+    combined = None
+    errors = {}
+    total = len(terms)
+
+    for i, term in enumerate(terms, start=1):
+        status.write(f"Fetching **{term}** ({i}/{total}) …")
+        try:
+            df = fetch_with_retry(term, timeframe, geo, hl, cat_id,
+                                  max_retries=max_retries, backoff_base=backoff_base)
+            combined = df if combined is None else combined.join(df, how="outer")
+        except Exception as e:
+            errors[term] = str(e)
+        progress.progress(int(i * 100 / total))
+        time.sleep(per_request_delay)
+
+    progress.empty(); status.empty()
+
+    if combined is None or combined.empty:
+        st.warning("No data returned.")
+        return None
+
+    combined = combined.sort_index()
+    combined_resampled = resample_df(combined, gran_rule)
+    st.line_chart(combined_resampled)
+    st.dataframe(combined_resampled.reset_index(), use_container_width=True)
+    download_csv(combined_resampled, "Download CSV (interest over time)", "interest_over_time.csv")
+
+    if show_raw:
+        with st.expander("Raw (combined)", expanded=False):
+            st.write(combined)
+
+    if errors:
+        st.warning("Some terms failed.")
+        st.json(errors)
+
+    return combined  # return for difficulty proxy if needed
+
+# -------------------------
+# SECTION: RELATED QUERIES
+# -------------------------
+def section_related_queries(terms, timeframe, geo, hl, cat_id):
+    st.markdown("### Related queries (Top & Rising)")
+    if not terms:
+        st.info("Add at least one term.")
+        return {}
+
+    try:
+        rq = cached_related_queries(tuple(terms), timeframe, geo, hl, cat_id)
+        if not rq:
+            st.warning("No related queries returned.")
+            return {}
+        for kw in terms:
+            st.markdown(f"**{kw}**")
+            d = rq.get(kw, {}) or {}
+            top_df = d.get("top")
+            rising_df = d.get("rising")
+
+            if top_df is not None and not top_df.empty:
+                st.write("Top")
+                st.dataframe(top_df, use_container_width=True, height=240)
+                download_csv(top_df, f"Download CSV (top) — {kw}", f"related_top_{kw}.csv")
+                if show_raw: st.caption(top_df.to_json(orient="records"))
+            else:
+                st.write("No Top results.")
+
+            if rising_df is not None and not rising_df.empty:
+                st.write("Rising")
+                st.dataframe(rising_df, use_container_width=True, height=240)
+                download_csv(rising_df, f"Download CSV (rising) — {kw}", f"related_rising_{kw}.csv")
+                if show_raw: st.caption(rising_df.to_json(orient="records"))
+            else:
+                st.write("No Rising results.")
+        return rq
+    except Exception as e:
+        st.error(f"Error: {e}")
+        return {}
+
+# -------------------------
+# SECTION: TRENDING SEARCHES
+# -------------------------
+def section_trending_searches():
+    st.markdown("### Trending searches (daily)")
+    pn_col1, _ = st.columns([1,3])
+    pn_name = pn_col1.selectbox("Country", list(PN_OPTIONS.keys()), index=0, key="pn")
+    if st.button("Fetch trending searches"):
+        try:
+            py = TrendReq(hl=hl, tz=0)
+            ts = py.trending_searches(pn=PN_OPTIONS[pn_name])
+            if ts.empty:
+                st.warning("No data returned.")
+            else:
+                st.dataframe(ts, use_container_width=True)
+                download_csv(ts, "Download CSV (trending searches)", "trending_searches.csv")
+                if show_raw:
+                    with st.expander("Raw", expanded=False):
+                        st.write(ts)
+        except Exception as e:
+            st.error(f"Error: {e}")
+
+# -------------------------
+# SECTION: SUGGESTIONS
+# -------------------------
+def section_suggestions(terms):
+    st.markdown("### Autocomplete suggestions")
+    if not terms:
+        st.info("Add at least one term.")
+        return
+    rows = []
+    for kw in terms:
+        try:
+            py = TrendReq(hl=hl, tz=0)
+            sug = py.suggestions(keyword=kw)
+            for s in sug:
+                rows.append({
+                    "seed": kw,
+                    "title": s.get("title"),
+                    "type": s.get("type"),
+                    "mid": s.get("mid")
+                })
+        except Exception as e:
+            rows.append({"seed": kw, "title": None, "type": None, "mid": None, "error": str(e)})
+        time.sleep(per_request_delay)
+
+    df = pd.DataFrame(rows)
+    if df.empty:
+        st.warning("No suggestions returned.")
+    else:
+        st.dataframe(df, use_container_width=True)
+        download_csv(df, "Download CSV (suggestions)", "suggestions.csv")
+        if show_raw:
+            with st.expander("Raw", expanded=False):
+                st.write(df)
+
+# -------------------------
+# SECTION: DIFFICULTY PROXY
+# -------------------------
+def section_difficulty_proxy(terms, timeframe, geo, hl, cat_id, iot_df=None, rq_dict=None):
+    st.markdown("### Difficulty proxy (0–100)")
+    st.caption("Higher = more competitive/‘hotter’. Combines base interest, trend slope, and Rising related queries intensity.")
+
+    # Use what we already have if provided (saves requests)
+    iot_all = {}
+    if iot_df is not None and not iot_df.empty:
+        for col in iot_df.columns:
+            iot_all[col] = iot_df[col]
+    else:
+        progress = st.progress(0)
+        status = st.empty()
+        total = len(terms)
+        for i, term in enumerate(terms, start=1):
+            status.write(f"Fetching time series for **{term}** ({i}/{total}) …")
+            try:
+                df = fetch_with_retry(term, timeframe, geo, hl, cat_id,
+                                      max_retries=max_retries, backoff_base=backoff_base)
+                if not df.empty:
+                    iot_all[term] = df[term]
+            except Exception:
+                pass
+            progress.progress(int(i * 100 / total))
+            time.sleep(per_request_delay)
+        progress.empty(); status.empty()
+
+    if rq_dict is None:
+        try:
+            rq_dict = cached_related_queries(tuple(terms), timeframe, geo, hl, cat_id) or {}
+        except Exception:
+            rq_dict = {}
+
+    rows = []
+    for term in terms:
+        series = iot_all.get(term, pd.Series(dtype=float))
+        base = float(np.nanmean(series.values)) if series.size else 0.0
+        slope_sc = slope_score_from_series(series)
+        rising = rising_intensity_from_rq(rq_dict.get(term))
+        score = difficulty_proxy(base, slope_sc, rising)
+        rows.append({
+            "keyword": term,
+            "base_interest_mean": round(base, 2),
+            "slope_score": round(slope_sc, 2),
+            "rising_intensity": round(rising, 2),
+            "difficulty_score": round(score, 1),
+            "band": band_from_score(score),
+        })
+
+    diff_df = pd.DataFrame(rows).sort_values("difficulty_score", ascending=False)
+    st.dataframe(diff_df, use_container_width=True)
+    download_csv(diff_df, "Download CSV (difficulty proxy)", "difficulty_proxy.csv")
+
+    if show_raw:
+        with st.expander("Raw inputs", expanded=False):
+            st.write("Interest series:", iot_all)
+            st.write("Related queries:", rq_dict)
+
+# -------------------------
+# RUN SELECTED SECTIONS
+# -------------------------
+iot_df = None
+rq_dict = None
+
+if run_all:
+    if do_iot:
+        iot_df = section_interest_over_time(terms, timeframe, geo, hl, cat_id, gran_rule)
+    if do_rq:
+        rq_dict = section_related_queries(terms, timeframe, geo, hl, cat_id)
+    if do_ts:
+        section_trending_searches()
+    if do_sug:
+        section_suggestions(terms)
+    if do_diff:
+        section_difficulty_proxy(terms, timeframe, geo, hl, cat_id, iot_df=iot_df, rq_dict=rq_dict)
+
+# Also allow running sections individually below (without pressing Run selected)
+st.divider()
+st.markdown("#### Run sections individually (optional)")
+if st.button("Run: Interest over time"):
+    section_interest_over_time(terms, timeframe, geo, hl, cat_id, gran_rule)
+if st.button("Run: Related queries"):
+    section_related_queries(terms, timeframe, geo, hl, cat_id)
+if st.button("Run: Trending searches"):
+    section_trending_searches()
+if st.button("Run: Suggestions"):
+    section_suggestions(terms)
+if st.button("Run: Difficulty proxy"):
+    section_difficulty_proxy(terms, timeframe, geo, hl, cat_id)
