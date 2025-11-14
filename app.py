@@ -20,8 +20,8 @@ class GoogleTrendsAnalyzer:
             st.session_state.last_search = None
         if 'pytrends_instance' not in st.session_state:
             st.session_state.pytrends_instance = None
-        if 'last_api_call_time' not in st.session_state:
-            st.session_state.last_api_call_time = 0
+        if 'connection_settings' not in st.session_state:
+            st.session_state.connection_settings = None
     
     @property
     def pytrends(self):
@@ -29,12 +29,21 @@ class GoogleTrendsAnalyzer:
         return st.session_state.pytrends_instance
             
     def create_connection(self, hl='en-US', tz=360, use_proxies=False, proxies_list=None):
-        """Create a connection to Google Trends API - reuses existing instance"""
+        """Create a connection to Google Trends API - creates new instance if settings change"""
         try:
-            # Reuse existing instance if available and settings haven't changed
-            if st.session_state.pytrends_instance is not None:
+            # Store connection settings to detect changes
+            current_settings = {
+                'hl': hl,
+                'tz': tz,
+                'use_proxies': use_proxies,
+                'proxies': tuple(proxies_list) if proxies_list else None
+            }
+            
+            # Check if settings changed
+            if st.session_state.connection_settings == current_settings and st.session_state.pytrends_instance is not None:
                 return True
-                
+            
+            # Settings changed or no instance - create new connection
             if use_proxies and proxies_list:
                 st.session_state.pytrends_instance = TrendReq(
                     hl=hl, 
@@ -42,7 +51,8 @@ class GoogleTrendsAnalyzer:
                     timeout=(10, 25),
                     proxies=proxies_list,
                     retries=2,
-                    backoff_factor=0.1
+                    backoff_factor=0.1,
+                    requests_args={'verify': False}
                 )
             else:
                 st.session_state.pytrends_instance = TrendReq(
@@ -52,135 +62,80 @@ class GoogleTrendsAnalyzer:
                     retries=2,
                     backoff_factor=0.1
                 )
+            
+            # Store the settings
+            st.session_state.connection_settings = current_settings
             return True
+            
         except Exception as e:
             st.error(f"Failed to create connection: {str(e)}")
             return False
     
-    def enforce_rate_limit(self):
-        """Enforce 60 second delay between API calls"""
-        time_since_last_call = time.time() - st.session_state.last_api_call_time
-        
-        if time_since_last_call < 60 and st.session_state.last_api_call_time > 0:
-            wait_time = int(60 - time_since_last_call)
-            progress_bar = st.progress(0)
-            status_text = st.empty()
-            
-            for i in range(wait_time):
-                status_text.text(f"⏱️ Rate limiting: waiting {wait_time - i} seconds...")
-                time.sleep(1)
-                progress_bar.progress((i + 1) / wait_time)
-            
-            progress_bar.empty()
-            status_text.empty()
-        
-        st.session_state.last_api_call_time = time.time()
-    
-    def get_interest_over_time(self, keywords, timeframe='today 5-y', geo='', cat=0, gprop=''):
-        """Get interest over time data"""
+    def get_historical_interest_data(self, keywords, year_start, month_start, day_start, 
+                                     year_end, month_end, day_end, geo='', cat=0, gprop=''):
+        """Get historical hourly interest data with built-in rate limiting"""
         try:
-            self.enforce_rate_limit()
-            self.pytrends.build_payload(keywords, cat=cat, timeframe=timeframe, geo=geo, gprop=gprop)
-            return self.pytrends.interest_over_time()
+            return self.pytrends.get_historical_interest(
+                keywords,
+                year_start=year_start,
+                month_start=month_start,
+                day_start=day_start,
+                hour_start=0,
+                year_end=year_end,
+                month_end=month_end,
+                day_end=day_end,
+                hour_end=0,
+                cat=cat,
+                geo=geo,
+                gprop=gprop,
+                sleep=60  # This is the built-in rate limiting
+            )
         except Exception as e:
-            if '429' in str(e):
-                self.handle_rate_limit_error(e)
-            else:
-                st.error(f"Error fetching interest over time: {str(e)}")
-            return None
-    
-    def get_interest_by_region(self, keywords, timeframe='today 5-y', geo='', cat=0, gprop='', resolution='COUNTRY'):
-        """Get interest by region data"""
-        try:
-            self.enforce_rate_limit()
-            self.pytrends.build_payload(keywords, cat=cat, timeframe=timeframe, geo=geo, gprop=gprop)
-            return self.pytrends.interest_by_region(resolution=resolution, inc_low_vol=True, inc_geo_code=True)
-        except Exception as e:
-            if '429' in str(e):
-                self.handle_rate_limit_error(e)
-            else:
-                st.error(f"Error fetching interest by region: {str(e)}")
+            st.error(f"Error fetching historical interest: {str(e)}")
             return None
     
     def get_related_queries(self, keywords, timeframe='today 5-y', geo='', cat=0, gprop=''):
         """Get related queries"""
         try:
-            self.enforce_rate_limit()
+            time.sleep(60)  # Manual rate limiting
             self.pytrends.build_payload(keywords, cat=cat, timeframe=timeframe, geo=geo, gprop=gprop)
             return self.pytrends.related_queries()
         except Exception as e:
-            if '429' in str(e):
-                self.handle_rate_limit_error(e)
-            else:
-                st.error(f"Error fetching related queries: {str(e)}")
+            st.error(f"Error fetching related queries: {str(e)}")
             return None
     
     def get_related_topics(self, keywords, timeframe='today 5-y', geo='', cat=0, gprop=''):
         """Get related topics"""
         try:
-            self.enforce_rate_limit()
+            time.sleep(60)  # Manual rate limiting
             self.pytrends.build_payload(keywords, cat=cat, timeframe=timeframe, geo=geo, gprop=gprop)
             return self.pytrends.related_topics()
         except Exception as e:
-            if '429' in str(e):
-                self.handle_rate_limit_error(e)
-            else:
-                st.error(f"Error fetching related topics: {str(e)}")
+            st.error(f"Error fetching related topics: {str(e)}")
             return None
     
     def get_trending_searches(self, pn='united_states'):
         """Get trending searches"""
         try:
-            self.enforce_rate_limit()
+            time.sleep(60)  # Manual rate limiting
             try:
                 return self.pytrends.trending_searches(pn=pn)
             except:
                 country_name = pn.replace('_', ' ').title()
                 return self.pytrends.trending_searches(pn=country_name)
         except Exception as e:
-            if '429' in str(e):
-                self.handle_rate_limit_error(e)
-            else:
-                st.error(f"Error fetching trending searches: {str(e)}")
-                st.info("Note: Trending searches may not be available for all countries or time periods")
+            st.error(f"Error fetching trending searches: {str(e)}")
+            st.info("Note: Trending searches may not be available for all countries or time periods")
             return None
     
     def get_suggestions(self, keyword):
         """Get keyword suggestions"""
         try:
-            self.enforce_rate_limit()
+            time.sleep(60)  # Manual rate limiting
             return self.pytrends.suggestions(keyword)
         except Exception as e:
-            if '429' in str(e):
-                self.handle_rate_limit_error(e)
-            else:
-                st.error(f"Error fetching suggestions: {str(e)}")
+            st.error(f"Error fetching suggestions: {str(e)}")
             return None
-    
-    def handle_rate_limit_error(self, e=None):
-        """Handle rate limit error with actual blocking wait"""
-        error_msg = f"Error details: {str(e)}" if e else ""
-        st.error(f"""
-        ⚠️ **Rate Limit Reached**
-        
-        Google Trends has rate limits. Waiting 60 seconds before retry...
-        
-        {error_msg}
-        """)
-        
-        # Actually wait 60 seconds
-        progress_bar = st.progress(0)
-        status_text = st.empty()
-        
-        for i in range(60):
-            status_text.text(f"⏱️ Waiting {60 - i} seconds...")
-            time.sleep(1)
-            progress_bar.progress((i + 1) / 60)
-        
-        progress_bar.empty()
-        status_text.empty()
-        st.success("✅ Wait complete. You can try again now.")
-        st.session_state.last_api_call_time = time.time()
 
 def main():
     st.set_page_config(
@@ -190,7 +145,7 @@ def main():
     )
     
     st.title("📊 Google Trends Analyzer")
-    st.markdown("Analyze search trends, discover related queries, and explore regional interest patterns")
+    st.markdown("Analyze search trends with built-in rate limiting")
     
     # Initialize analyzer
     analyzer = GoogleTrendsAnalyzer()
@@ -210,7 +165,7 @@ def main():
             proxy_input = st.text_area("Enter proxies (one per line)", 
                                       placeholder="https://34.203.233.13:80\nhttps://35.201.123.31:880")
             if proxy_input:
-                proxies_list = proxy_input.strip().split('\n')
+                proxies_list = [p.strip() for p in proxy_input.strip().split('\n') if p.strip()]
         
         # Create connection
         if analyzer.create_connection(hl, tz, use_proxies, proxies_list):
@@ -224,41 +179,18 @@ def main():
         # Keywords input
         keywords_input = st.text_area(
             "Keywords (one per line, max 5)",
-            value="Brexit\nCOVID-19",
+            value="Mortgage",
             help="Enter up to 5 keywords to compare"
         )
         keywords = [k.strip() for k in keywords_input.split('\n') if k.strip()][:5]
         
-        # Timeframe
-        timeframe_option = st.selectbox(
-            "Timeframe",
-            ["Past hour", "Past 4 hours", "Past day", "Past 7 days", 
-             "Past 30 days", "Past 90 days", "Past 12 months", 
-             "Past 5 years", "All time", "Custom range"],
-            index=6
-        )
-        
-        timeframe_map = {
-            "Past hour": "now 1-H",
-            "Past 4 hours": "now 4-H",
-            "Past day": "now 1-d",
-            "Past 7 days": "now 7-d",
-            "Past 30 days": "today 1-m",
-            "Past 90 days": "today 3-m",
-            "Past 12 months": "today 12-m",
-            "Past 5 years": "today 5-y",
-            "All time": "all"
-        }
-        
-        if timeframe_option == "Custom range":
-            col1, col2 = st.columns(2)
-            with col1:
-                start_date = st.date_input("Start date", datetime.now() - timedelta(days=30))
-            with col2:
-                end_date = st.date_input("End date", datetime.now())
-            timeframe = f"{start_date} {end_date}"
-        else:
-            timeframe = timeframe_map[timeframe_option]
+        # Date range
+        st.subheader("Date Range")
+        col1, col2 = st.columns(2)
+        with col1:
+            start_date = st.date_input("Start date", datetime.now() - timedelta(days=90))
+        with col2:
+            end_date = st.date_input("End date", datetime.now())
         
         # Geographic location
         geo = st.text_input("Geographic Location", value="GB", 
@@ -281,11 +213,13 @@ def main():
         
         # Analysis options
         st.subheader("Analysis Options")
-        show_interest_over_time = st.checkbox("Interest Over Time", value=True)
-        show_related_queries = st.checkbox("Related Queries", value=True)
+        show_interest_over_time = st.checkbox("Historical Interest", value=True)
+        show_related_queries = st.checkbox("Related Queries", value=False)
         show_related_topics = st.checkbox("Related Topics", value=False)
         show_trending = st.checkbox("Trending Searches", value=False)
         show_suggestions = st.checkbox("Keyword Suggestions", value=False)
+        
+        st.warning("⏱️ Each analysis waits 60 seconds between API calls to avoid rate limits")
     
     # Main content area
     if st.button("🔍 Analyze Trends", type="primary"):
@@ -301,7 +235,8 @@ def main():
         # Store search parameters
         search_params = {
             'keywords': keywords,
-            'timeframe': timeframe,
+            'start_date': start_date,
+            'end_date': end_date,
             'geo': geo,
             'cat': cat,
             'gprop': gprop
@@ -311,7 +246,7 @@ def main():
         # Create tabs for different analyses
         tab_names = []
         if show_interest_over_time:
-            tab_names.append("📈 Interest Over Time")
+            tab_names.append("📈 Historical Interest")
         if show_related_queries:
             tab_names.append("🔍 Related Queries")
         if show_related_topics:
@@ -328,24 +263,37 @@ def main():
             st.warning("Please select at least one analysis option in the sidebar.")
             return
         
-        # Interest Over Time
+        # Historical Interest
         if show_interest_over_time:
             with tabs[tab_index]:
-                st.subheader("📈 Interest Over Time")
-                with st.spinner("Fetching interest over time data..."):
-                    iot_data = analyzer.get_interest_over_time(keywords, timeframe, geo, cat, gprop)
+                st.subheader("📈 Historical Interest Over Time")
+                st.info("Using get_historical_interest() with built-in 60-second rate limiting between requests")
+                
+                with st.spinner("Fetching historical interest data (this will take time due to rate limiting)..."):
+                    historical_data = analyzer.get_historical_interest_data(
+                        keywords,
+                        year_start=start_date.year,
+                        month_start=start_date.month,
+                        day_start=start_date.day,
+                        year_end=end_date.year,
+                        month_end=end_date.month,
+                        day_end=end_date.day,
+                        geo=geo,
+                        cat=cat,
+                        gprop=gprop
+                    )
                     
-                if iot_data is not None and not iot_data.empty:
+                if historical_data is not None and not historical_data.empty:
                     # Remove 'isPartial' column if it exists
-                    if 'isPartial' in iot_data.columns:
-                        iot_data = iot_data.drop('isPartial', axis=1)
+                    if 'isPartial' in historical_data.columns:
+                        historical_data = historical_data.drop('isPartial', axis=1)
                     
                     # Create line chart
                     fig = go.Figure()
-                    for col in iot_data.columns:
+                    for col in historical_data.columns:
                         fig.add_trace(go.Scatter(
-                            x=iot_data.index,
-                            y=iot_data[col],
+                            x=historical_data.index,
+                            y=historical_data[col],
                             mode='lines',
                             name=col,
                             line=dict(width=2)
@@ -363,25 +311,28 @@ def main():
                     
                     # Show data table
                     with st.expander("📊 View Data Table"):
-                        st.dataframe(iot_data, use_container_width=True)
+                        st.dataframe(historical_data, use_container_width=True)
                         
                         # Download button
-                        csv = iot_data.to_csv()
+                        csv = historical_data.to_csv()
                         st.download_button(
                             label="📥 Download CSV",
                             data=csv,
-                            file_name=f"interest_over_time_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+                            file_name=f"historical_interest_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
                             mime="text/csv"
                         )
+                else:
+                    st.error("No data returned. You may still be rate-limited.")
             tab_index += 1
         
         # Related Queries
         if show_related_queries:
             with tabs[tab_index]:
                 st.subheader("🔍 Related Queries")
+                st.info("Waiting 60 seconds before fetching...")
                 
                 with st.spinner("Fetching related queries..."):
-                    queries_data = analyzer.get_related_queries(keywords, timeframe, geo, cat, gprop)
+                    queries_data = analyzer.get_related_queries(keywords, f"{start_date} {end_date}", geo, cat, gprop)
                 
                 if queries_data:
                     for keyword in keywords:
@@ -415,9 +366,10 @@ def main():
         if show_related_topics:
             with tabs[tab_index]:
                 st.subheader("📚 Related Topics")
+                st.info("Waiting 60 seconds before fetching...")
                 
                 with st.spinner("Fetching related topics..."):
-                    topics_data = analyzer.get_related_topics(keywords, timeframe, geo, cat, gprop)
+                    topics_data = analyzer.get_related_topics(keywords, f"{start_date} {end_date}", geo, cat, gprop)
                 
                 if topics_data:
                     for keyword in keywords:
@@ -469,6 +421,7 @@ def main():
                 
                 pn_code = country_code
                 
+                st.info("Waiting 60 seconds before fetching...")
                 with st.spinner("Fetching trending searches..."):
                     trending_data = analyzer.get_trending_searches(pn_code)
                 
@@ -493,6 +446,7 @@ def main():
                 for keyword in keywords:
                     st.write(f"**Suggestions for: {keyword}**")
                     
+                    st.info("Waiting 60 seconds before fetching...")
                     with st.spinner(f"Fetching suggestions for {keyword}..."):
                         suggestions = analyzer.get_suggestions(keyword)
                     
@@ -509,7 +463,7 @@ def main():
     st.markdown("""
     <div style='text-align: center; color: gray;'>
         <p>📊 Google Trends Analyzer | Built with Streamlit and PyTrends</p>
-        <p>⚠️ Note: Google Trends has rate limits. If you encounter errors, please wait 60 seconds before retrying.</p>
+        <p>⚠️ Rate limiting: 60 seconds between each API call</p>
     </div>
     """, unsafe_allow_html=True)
 
